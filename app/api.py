@@ -6,27 +6,28 @@ import shutil
 import numpy as np
 import asyncio
 
-from app.models import InstagramVideoRequest, VideoSentimentResponse
+from app.models import YouTubeVideoRequest, VideoSentimentResponse
 from app.services import (
-    download_instagram_video,
+    extract_youtube_transcript,
     extract_audio_from_video,
     transcribe_audio,
     analyze_text_sentiment,
+    get_extreme_sentiment_scores,
     MODEL
 )
 
 router = APIRouter(
-    prefix="/instagram",
-    tags=["instagram-video-sentiment"]
+    prefix="/youtube",
+    tags=["youtube-video-sentiment"]
 )
 
 @router.get("/")
 async def root():
     return {
-        "message": "Instagram Video Sentiment Analysis API is running!",
-        "description": "Analyze sentiment of Instagram videos/reels by transcribing their audio content",
+        "message": "YouTube Video Sentiment Analysis API is running!",
+        "description": "Analyze sentiment of YouTube videos by extracting their transcripts",
         "endpoints": {
-            "/analyze_video_url": "Analyze Instagram video from URL",
+            "/analyze_video_url": "Analyze YouTube video from URL",
             "/analyze_uploaded_video": "Analyze uploaded video file",
         },
     }
@@ -40,45 +41,33 @@ async def health_check():
     }
 
 @router.post("/analyze_video_url", response_model=VideoSentimentResponse)
-async def analyze_instagram_video(request: InstagramVideoRequest):
-    """Analyze sentiment of Instagram video by transcribing its audio"""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        try:
-            video_path = os.path.join(temp_dir, "video.mp4")
-            audio_path = os.path.join(temp_dir, "audio.wav")
+async def analyze_youtube_video(request: YouTubeVideoRequest):
+    """Analyze sentiment of YouTube video by extracting its transcript"""
+    try:
+        # Run blocking I/O and CPU-bound operations in a separate thread
+        transcription_result = await asyncio.to_thread(extract_youtube_transcript, request.video_url, request.transcribe_language)
 
-            # Run blocking I/O and CPU-bound operations in a separate thread
-            await asyncio.to_thread(download_instagram_video, request.video_url, video_path)
-            await asyncio.to_thread(extract_audio_from_video, video_path, audio_path)
-            transcription_result = await asyncio.to_thread(transcribe_audio, audio_path, request.transcribe_language)
+        if not transcription_result['text']:
+            raise HTTPException(status_code=400, detail="No transcript available for the video")
 
-            if not transcription_result['text']:
-                raise HTTPException(status_code=400, detail="No speech detected in the video")
+        sentiment_scores = await asyncio.to_thread(analyze_text_sentiment, transcription_result['text'])
+        
+        sentiment_labels = ['negative', 'neutral', 'positive']
+        predicted_sentiment = sentiment_labels[np.argmax(list(sentiment_scores.values()))]
 
-            sentiment_scores = await asyncio.to_thread(analyze_text_sentiment, transcription_result['text'])
-            
-            sentiment_labels = ['negative', 'neutral', 'positive']
-            predicted_sentiment = sentiment_labels[np.argmax(list(sentiment_scores.values()))]
+        # Get extreme sentiment scores from segments
+        extreme_scores = await asyncio.to_thread(get_extreme_sentiment_scores, transcription_result.get('segments', []))
 
-            text_segments = [
-                {
-                    'start': seg.get('start', 0),
-                    'end': seg.get('end', 0),
-                    'text': seg.get('text', ''),
-                    'confidence': 1.0 - seg.get('no_speech_prob', 0.5)
-                } for seg in transcription_result.get('segments', [])
-            ]
-
-            return VideoSentimentResponse(
-                video_url=request.video_url,
-                transcription=transcription_result['text'],
-                transcription_confidence=1.0 - transcription_result['confidence'],
-                sentiment_scores=sentiment_scores,
-                predicted_sentiment=predicted_sentiment,
-                text_segments=text_segments
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error processing video: {str(e)}")
+        return VideoSentimentResponse(
+            video_url=request.video_url,
+            transcription=transcription_result['text'],
+            transcription_confidence=transcription_result['confidence'],
+            sentiment_scores=sentiment_scores,
+            predicted_sentiment=predicted_sentiment,
+            extreme_scores=extreme_scores
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing video: {str(e)}")
 
 @router.post("/analyze_uploaded_video", response_model=VideoSentimentResponse)
 async def analyze_uploaded_video(
@@ -111,14 +100,8 @@ async def analyze_uploaded_video(
             sentiment_labels = ['negative', 'neutral', 'positive']
             predicted_sentiment = sentiment_labels[np.argmax(list(sentiment_scores.values()))]
 
-            text_segments = [
-                {
-                    'start': seg.get('start', 0),
-                    'end': seg.get('end', 0),
-                    'text': seg.get('text', ''),
-                    'confidence': 1.0 - seg.get('no_speech_prob', 0.5)
-                } for seg in transcription_result.get('segments', [])
-            ]
+            # Get extreme sentiment scores from segments
+            extreme_scores = await asyncio.to_thread(get_extreme_sentiment_scores, transcription_result.get('segments', []))
 
             return VideoSentimentResponse(
                 video_url=f"uploaded:{file.filename}",
@@ -126,7 +109,7 @@ async def analyze_uploaded_video(
                 transcription_confidence=1.0 - transcription_result['confidence'],
                 sentiment_scores=sentiment_scores,
                 predicted_sentiment=predicted_sentiment,
-                text_segments=text_segments
+                extreme_scores=extreme_scores
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error processing uploaded video: {str(e)}") 

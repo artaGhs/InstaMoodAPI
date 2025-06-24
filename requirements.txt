@@ -5,9 +5,11 @@ uvicorn[standard]
 transformers==4.41.2
 scipy
 numpy
+ffmpeg-python
 yt-dlp
 openai-whisper @ git+https://github.com/openai/whisper.git@dd985ac4b90cafeef8712f2998d62c59c3e62d22
 librosa
 soundfile
 python-multipart
-pydantic-settings 
+pydantic-settings
+requests 
