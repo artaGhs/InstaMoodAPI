@@ -49,9 +49,8 @@ Thumbs.db
 *.tmp
 
 # Option 1: Exclude large model files from Git (recommended for Azure deployment)
-# Uncomment these lines if you want to exclude models from Git:
-# models/
-# download_models.py
+# Models are too large for GitHub (>100MB), so we download them during deployment
+models/
 
 # Option 2: Use Git LFS for model files (if you want to version them)
 # In this case, run: git lfs track "*.safetensors" "*.bin"

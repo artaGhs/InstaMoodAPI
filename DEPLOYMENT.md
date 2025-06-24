@@ -8,10 +8,12 @@ This application uses pre-downloaded models for faster startup and reliable offl
 
 1. **Download Models Locally:**
    ```bash
-   python download_models.py
+   python scripts/download_models.py
    ```
    This downloads:
    - Sentiment analysis model: `cardiffnlp/twitter-roberta-base-sentiment`
+
+**Note:** Models are excluded from Git due to size (>100MB). They're downloaded during Azure deployment.
 
 2. **Models Directory Structure:**
    ```
