@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# FastAPI
+.env
+
+# Temporary files
+*.log
+*.tmp
+
+# Option 1: Exclude large model files from Git (recommended for Azure deployment)
+# Uncomment these lines if you want to exclude models from Git:
+# models/
+# download_models.py
+
+# Option 2: Use Git LFS for model files (if you want to version them)
+# In this case, run: git lfs track "*.safetensors" "*.bin"
+# And keep the models/ directory tracked 

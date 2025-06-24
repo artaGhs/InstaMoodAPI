@@ -1,26 +1,201 @@
-from fastapi import HTTPException
+from fastapi import HTTPException, FastAPI
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from scipy.special import softmax
 import torch
 import numpy as np
 import re
-import subprocess
-import whisper
 import yt_dlp
-import librosa
+import os
 from typing import Optional, List
+from contextlib import asynccontextmanager
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
-# --- Model Loading ---
-# This is a heavy operation, so it's done once when the module is loaded.
-MODEL = "cardiffnlp/twitter-roberta-base-sentiment"
-tokenizer = AutoTokenizer.from_pretrained(MODEL)
-model = AutoModelForSequenceClassification.from_pretrained(MODEL)
-whisper_model = whisper.load_model("base")
+# Use local model paths for offline deployment
+SENTIMENT_MODEL_PATH = "./models/sentiment-model"
+
+# YouTube API configuration
+YOUTUBE_API_SERVICE_NAME = "youtube"
+YOUTUBE_API_VERSION = "v3"
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")  # Set this in Azure App Service Configuration
+
+# Global variables to store models (will be loaded during lifespan)
+tokenizer = None
+sentiment_model = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global tokenizer, sentiment_model
+    print("Loading sentiment model from local files...")
+    tokenizer = AutoTokenizer.from_pretrained(SENTIMENT_MODEL_PATH)
+    sentiment_model = AutoModelForSequenceClassification.from_pretrained(SENTIMENT_MODEL_PATH)
+    print("Sentiment model loaded.")
+    yield
+    print("Cleaning up models...")
+    tokenizer = None
+    sentiment_model = None
 
 # --- Service Functions ---
 
 def extract_youtube_transcript(youtube_url: str, language: Optional[str] = None) -> dict:
-    """Extract transcript from YouTube video using yt-dlp"""
+    """Extract transcript from YouTube video using Google YouTube API (preferred) or yt-dlp (fallback)"""
+    
+    # Extract video ID from URL
+    video_id = extract_video_id_from_url(youtube_url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+    
+    # Try Google YouTube API first (preferred method)
+    if YOUTUBE_API_KEY:
+        try:
+            return extract_transcript_with_youtube_api(video_id, language)
+        except Exception as e:
+            print(f"YouTube API failed, falling back to yt-dlp: {str(e)}")
+    else:
+        print("YouTube API key not configured, using yt-dlp fallback")
+    
+    # Fallback to yt-dlp method
+    return extract_transcript_with_ytdlp(youtube_url, language)
+
+
+def extract_video_id_from_url(url: str) -> Optional[str]:
+    """Extract video ID from YouTube URL"""
+    import re
+    patterns = [
+        r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)',
+        r'youtube\.com\/watch\?.*v=([^&\n?#]+)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def extract_transcript_with_youtube_api(video_id: str, language: Optional[str] = None) -> dict:
+    """Extract transcript using official Google YouTube API"""
+    try:
+        # Build the YouTube service
+        youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=YOUTUBE_API_KEY)
+        
+        # Get list of available captions
+        caption_request = youtube.captions().list(
+            part="snippet",
+            videoId=video_id
+        )
+        caption_response = caption_request.execute()
+        
+        # Find the appropriate caption track
+        caption_id = None
+        target_language = language or "en"
+        
+        # First, try to find exact language match
+        for item in caption_response.get("items", []):
+            if item["snippet"]["language"] == target_language:
+                caption_id = item["id"]
+                break
+        
+        # If no exact match and no specific language requested, try English variants
+        if not caption_id and language is None:
+            for item in caption_response.get("items", []):
+                lang = item["snippet"]["language"]
+                if lang.startswith("en"):  # en, en-US, en-GB, etc.
+                    caption_id = item["id"]
+                    break
+        
+        # If still no match, take the first available caption
+        if not caption_id and caption_response.get("items"):
+            caption_id = caption_response["items"][0]["id"]
+            print(f"Using first available caption: {caption_response['items'][0]['snippet']['language']}")
+        
+        if not caption_id:
+            raise ValueError(f"No captions found for video {video_id}")
+        
+        # Download the transcript
+        transcript_request = youtube.captions().download(
+            id=caption_id,
+            tfmt='srt'  # SubRip format
+        )
+        
+        transcript_content = transcript_request.execute().decode('utf-8')
+        
+        # Parse SRT format and return structured data
+        return parse_srt_transcript(transcript_content, target_language)
+        
+    except HttpError as e:
+        if e.resp.status == 403:
+            raise HTTPException(status_code=403, detail="YouTube API quota exceeded or invalid API key")
+        elif e.resp.status == 404:
+            raise HTTPException(status_code=404, detail="Video not found or captions not available")
+        else:
+            raise HTTPException(status_code=500, detail=f"YouTube API error: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to extract transcript via YouTube API: {str(e)}")
+
+
+def parse_srt_transcript(srt_content: str, language: str) -> dict:
+    """Parse SRT subtitle format into structured transcript data"""
+    try:
+        segments = []
+        text_parts = []
+        
+        # Split SRT into blocks
+        blocks = srt_content.strip().split('\n\n')
+        
+        for block in blocks:
+            lines = block.strip().split('\n')
+            if len(lines) >= 3:
+                # Parse timestamp line (format: 00:00:01,000 --> 00:00:04,000)
+                timestamp_line = lines[1]
+                if ' --> ' in timestamp_line:
+                    start_str, end_str = timestamp_line.split(' --> ')
+                    start_time = parse_srt_timestamp(start_str)
+                    end_time = parse_srt_timestamp(end_str)
+                    
+                    # Join text lines (lines 2 onwards)
+                    text = ' '.join(lines[2:]).strip()
+                    # Clean up HTML tags and formatting
+                    text = re.sub(r'<[^>]+>', '', text)
+                    text = text.replace('&quot;', '"').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+                    
+                    if text:
+                        text_parts.append(text)
+                        segments.append({
+                            'start': start_time,
+                            'end': end_time,
+                            'text': text,
+                            'confidence': 0.95  # High confidence for official captions
+                        })
+        
+        full_text = ' '.join(text_parts)
+        
+        return {
+            'text': full_text.strip(),
+            'language': language,
+            'segments': segments,
+            'confidence': 0.95 if segments else 0.5
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse SRT transcript: {str(e)}")
+
+
+def parse_srt_timestamp(timestamp_str: str) -> float:
+    """Convert SRT timestamp (HH:MM:SS,mmm) to seconds"""
+    try:
+        # Format: 00:00:01,000
+        time_part, ms_part = timestamp_str.split(',')
+        hours, minutes, seconds = map(int, time_part.split(':'))
+        milliseconds = int(ms_part)
+        
+        total_seconds = hours * 3600 + minutes * 60 + seconds + milliseconds / 1000.0
+        return total_seconds
+    except:
+        return 0.0
+
+
+def extract_transcript_with_ytdlp(youtube_url: str, language: Optional[str] = None) -> dict:
+    """Fallback method: Extract transcript using yt-dlp"""
     try:
         ydl_opts = {
             'writesubtitles': True,
@@ -61,11 +236,11 @@ def extract_youtube_transcript(youtube_url: str, language: Optional[str] = None)
                                     caption_data = response.json()
                                     return parse_youtube_caption_json(caption_data)
             
-            # If no captions available, fall back to audio extraction and transcription
-            return extract_audio_and_transcribe(youtube_url, language)
+            # If no captions available, return error
+            raise HTTPException(status_code=404, detail="No captions or subtitles available for this video")
             
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to extract transcript: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to extract transcript with yt-dlp: {str(e)}")
 
 def parse_youtube_caption_json(caption_data: dict) -> dict:
     """Parse YouTube caption JSON format"""
@@ -105,73 +280,7 @@ def parse_youtube_caption_json(caption_data: dict) -> dict:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse caption data: {str(e)}")
 
-def extract_audio_and_transcribe(youtube_url: str, language: Optional[str] = None) -> dict:
-    """Fallback: Download video, extract audio, and transcribe"""
-    import tempfile
-    import os
-    
-    with tempfile.TemporaryDirectory() as temp_dir:
-        video_path = os.path.join(temp_dir, "video.mp4")
-        audio_path = os.path.join(temp_dir, "audio.wav")
-        
-        # Download video
-        download_youtube_video(youtube_url, video_path)
-        
-        # Extract audio
-        extract_audio_from_video(video_path, audio_path)
-        
-        # Transcribe audio
-        return transcribe_audio(audio_path, language)
 
-def download_youtube_video(youtube_url: str, output_path: str) -> str:
-    """Download YouTube video using yt-dlp"""
-    try:
-        ydl_opts = {
-            'format': 'best[ext=mp4]/best',
-            'outtmpl': output_path,
-            'noplaylist': True,
-            'quiet': True,
-            'no_warnings': True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([youtube_url])
-        return output_path
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to download video: {str(e)}")
-
-def extract_audio_from_video(video_path: str, audio_path: str) -> str:
-    """Extract audio from video file using ffmpeg."""
-    try:
-        subprocess.run([
-            'ffmpeg', '-i', video_path, '-vn', '-acodec', 'pcm_s16le',
-            '-ar', '16000', '-ac', '1', audio_path, '-y'
-        ], check=True, capture_output=True, text=True)
-        return audio_path
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=500,
-            detail="ffmpeg not found. Please ensure ffmpeg is installed and in your PATH."
-        )
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to extract audio: {e.stderr}")
-
-def transcribe_audio(audio_path: str, language: Optional[str] = None) -> dict:
-    """Transcribe audio using Whisper"""
-    try:
-        result = whisper_model.transcribe(
-            audio_path,
-            language=language,
-            word_timestamps=True,
-            verbose=False
-        )
-        return {
-            'text': result['text'].strip(),
-            'language': result['language'],
-            'segments': result.get('segments', []),
-            'confidence': np.mean([seg.get('no_speech_prob', 0.5) for seg in result.get('segments', [{'no_speech_prob': 0.5}])])
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to transcribe audio: {str(e)}")
 
 def analyze_text_sentiment(text: str) -> dict:
     """Analyze sentiment of transcribed text"""
@@ -188,7 +297,7 @@ def analyze_text_sentiment(text: str) -> dict:
                 if sentence.strip():
                     encoded_text = tokenizer(sentence.strip(), return_tensors='pt', truncation=True, max_length=512)
                     with torch.no_grad():
-                        output = model(**encoded_text)
+                        output = sentiment_model(**encoded_text)
                     scores = output[0][0].detach().numpy()
                     scores = softmax(scores)
                     sentence_scores.append({
@@ -206,7 +315,7 @@ def analyze_text_sentiment(text: str) -> dict:
 
         encoded_text = tokenizer(cleaned_text, return_tensors='pt', truncation=True, max_length=512)
         with torch.no_grad():
-            output = model(**encoded_text)
+            output = sentiment_model(**encoded_text)
         scores = output[0][0].detach().numpy()
         scores = softmax(scores)
         return {
