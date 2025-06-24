@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from typing import Optional
+import os
 import numpy as np
 import asyncio
 
@@ -31,7 +32,8 @@ async def health_check():
     return {
         "status": "healthy",
         "sentiment_model": "local:" + SENTIMENT_MODEL_PATH,
-        "transcript_methods": ["YouTube API", "yt-dlp fallback"],
+        "transcript_method": "YouTube Data API v3 (official)",
+        "youtube_api_configured": bool(os.getenv("YOUTUBE_API_KEY")),
     }
 
 @router.post("/analyze_video_url", response_model=VideoSentimentResponse)

@@ -109,10 +109,10 @@ For reliable transcript extraction, configure the YouTube Data API v3:
    - Each transcript request costs ~3-7 units
    - Monitor usage in Google Cloud Console
 
-4. **Fallback Behavior:**
-   - ✅ If API key is configured: Uses official YouTube API (faster, more reliable)
-   - ⚠️ If API key missing: Falls back to yt-dlp (slower, less reliable)
-   - 🚫 If both fail: Returns error (no captions available)
+4. **API Requirement:**
+   - ✅ **YouTube API Key Required:** Application only uses official YouTube Data API v3
+   - 🚫 **No API Key:** Application will return error (API key required)
+   - 🎯 **Benefits:** Reliable, fast, no bot detection issues
 
 ### Benefits of Local Models
 
@@ -143,4 +143,4 @@ result = extract_transcript_with_youtube_api("dQw4w9WgXcQ")
 print(f"Transcript extracted: {len(result['text'])} characters")
 ```
 
-**Note:** This application now only supports YouTube URL-based transcript extraction. File upload functionality has been removed to reduce complexity and dependencies. 
+**Note:** This application now only supports YouTube URL-based transcript extraction using the official YouTube Data API v3. yt-dlp fallback and file upload functionality have been removed to ensure reliability and avoid bot detection issues. 

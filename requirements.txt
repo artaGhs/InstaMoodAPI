@@ -5,7 +5,6 @@ uvicorn[standard]
 transformers==4.41.2
 scipy
 numpy
-yt-dlp
 python-multipart
 pydantic-settings
 requests 

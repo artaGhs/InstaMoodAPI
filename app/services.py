@@ -4,7 +4,6 @@ from scipy.special import softmax
 import torch
 import numpy as np
 import re
-import yt_dlp
 import os
 from typing import Optional, List
 from contextlib import asynccontextmanager
@@ -38,24 +37,22 @@ async def lifespan(app: FastAPI):
 # --- Service Functions ---
 
 def extract_youtube_transcript(youtube_url: str, language: Optional[str] = None) -> dict:
-    """Extract transcript from YouTube video using Google YouTube API (preferred) or yt-dlp (fallback)"""
+    """Extract transcript from YouTube video using Google YouTube API"""
     
     # Extract video ID from URL
     video_id = extract_video_id_from_url(youtube_url)
     if not video_id:
         raise HTTPException(status_code=400, detail="Invalid YouTube URL")
     
-    # Try Google YouTube API first (preferred method)
-    if YOUTUBE_API_KEY:
-        try:
-            return extract_transcript_with_youtube_api(video_id, language)
-        except Exception as e:
-            print(f"YouTube API failed, falling back to yt-dlp: {str(e)}")
-    else:
-        print("YouTube API key not configured, using yt-dlp fallback")
+    # Check if API key is configured
+    if not YOUTUBE_API_KEY:
+        raise HTTPException(
+            status_code=500, 
+            detail="YouTube API key not configured. Please set YOUTUBE_API_KEY environment variable."
+        )
     
-    # Fallback to yt-dlp method
-    return extract_transcript_with_ytdlp(youtube_url, language)
+    # Use Google YouTube API
+    return extract_transcript_with_youtube_api(video_id, language)
 
 
 def extract_video_id_from_url(url: str) -> Optional[str]:
@@ -194,91 +191,7 @@ def parse_srt_timestamp(timestamp_str: str) -> float:
         return 0.0
 
 
-def extract_transcript_with_ytdlp(youtube_url: str, language: Optional[str] = None) -> dict:
-    """Fallback method: Extract transcript using yt-dlp"""
-    try:
-        ydl_opts = {
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'subtitleslangs': [language] if language else ['en'],
-            'skip_download': True,
-            'quiet': True,
-            'no_warnings': True,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
-            
-            # Try to get automatic captions first
-            if 'automatic_captions' in info and info['automatic_captions']:
-                for lang_code, captions in info['automatic_captions'].items():
-                    if language is None or lang_code == language:
-                        for caption in captions:
-                            if caption['ext'] == 'json3':
-                                # Download the caption file
-                                caption_url = caption['url']
-                                import requests
-                                response = requests.get(caption_url)
-                                if response.status_code == 200:
-                                    caption_data = response.json()
-                                    return parse_youtube_caption_json(caption_data)
-            
-            # Try manual captions if automatic captions not available
-            if 'subtitles' in info and info['subtitles']:
-                for lang_code, captions in info['subtitles'].items():
-                    if language is None or lang_code == language:
-                        for caption in captions:
-                            if caption['ext'] == 'json3':
-                                caption_url = caption['url']
-                                import requests
-                                response = requests.get(caption_url)
-                                if response.status_code == 200:
-                                    caption_data = response.json()
-                                    return parse_youtube_caption_json(caption_data)
-            
-            # If no captions available, return error
-            raise HTTPException(status_code=404, detail="No captions or subtitles available for this video")
-            
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to extract transcript with yt-dlp: {str(e)}")
 
-def parse_youtube_caption_json(caption_data: dict) -> dict:
-    """Parse YouTube caption JSON format"""
-    try:
-        text_parts = []
-        segments = []
-        
-        if 'events' in caption_data:
-            for event in caption_data['events']:
-                if 'segs' in event:
-                    segment_text = ""
-                    for seg in event['segs']:
-                        if 'utf8' in seg:
-                            segment_text += seg['utf8']
-                    
-                    if segment_text.strip():
-                        start_time = event.get('tStartMs', 0) / 1000.0
-                        duration = event.get('dDurationMs', 0) / 1000.0
-                        end_time = start_time + duration
-                        
-                        text_parts.append(segment_text)
-                        segments.append({
-                            'start': start_time,
-                            'end': end_time,
-                            'text': segment_text.strip(),
-                            'confidence': 0.9  # High confidence for manual captions
-                        })
-        
-        full_text = ' '.join(text_parts)
-        
-        return {
-            'text': full_text.strip(),
-            'language': 'en',  # Default, could be extracted from caption data
-            'segments': segments,
-            'confidence': 0.9 if segments else 0.5
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse caption data: {str(e)}")
 
 
 
